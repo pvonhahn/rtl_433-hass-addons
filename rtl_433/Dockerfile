@@ -14,14 +14,33 @@ RUN apk add --no-cache --virtual .buildDeps \
     libusb-dev \
     hackrf \
     hackrf-dev \
-    librtlsdr-dev \
     soapy-sdr \
     soapy-sdr-dev \
     openssl-dev \
     cmake \
+    pkgconf \
     git
 
 WORKDIR /build
+
+# Build librtlsdr from source instead of using Alpine's librtlsdr package.
+# Alpine 3.24 ships librtlsdr 2.0.2, which predates RTL-SDR Blog V4L support
+# (osmocom/rtl-sdr 0204c9c, released in v2.0.3). Without it the V4L is driven
+# as a plain R820T and fails with "[R82XX] PLL not locked!". It is installed
+# into this stage's /usr so the rtl_433 build below links against it, and
+# staged into /build/rtlsdr-root for copying into the runtime image.
+ARG rtlsdrGitRevision=v2.0.3
+# hadolint ignore=DL3003
+RUN git clone https://github.com/osmocom/rtl-sdr.git /build/rtl-sdr \
+    && git -C /build/rtl-sdr checkout ${rtlsdrGitRevision} \
+    && mkdir /build/rtl-sdr/build \
+    && cd /build/rtl-sdr/build \
+    && cmake -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
+        -DDETACH_KERNEL_DRIVER=ON .. \
+    && make -j 4 \
+    && make install \
+    && make DESTDIR=/build/rtlsdr-root install \
+    && rm -rf /build/rtl-sdr
 
 FROM builder AS rtl_433_builder
 
@@ -77,12 +96,14 @@ ENV LANG=C.UTF-8
 RUN apk add --no-cache \
     libusb \
     hackrf \
-    librtlsdr \
-    rtl-sdr \
     gnuplot \
     soapy-sdr \
     sed
 WORKDIR /root
+# librtlsdr and its CLI tools (rtl_eeprom, rtl_test, rtl_power, ...) built in
+# the builder stage; run.sh depends on these tools.
+COPY --from=builder /build/rtlsdr-root/usr/lib/ /usr/lib/
+COPY --from=builder /build/rtlsdr-root/usr/bin/ /usr/bin/
 COPY --from=rtl_433_builder /build/root/ /
 
 COPY --from=soapy_hackrf_builder /usr/lib /lib-s
